@@ -4,6 +4,7 @@ const express = require('express');
 const { Telegraf, session } = require('telegraf');
 const app = express();
 const axios = require('axios');
+const { buildPayload, headers, API_URL } = require('./api-cekpayment-orkut');
 const { QRISGenerator } = require('autoft-qris');
 const winston = require('winston');
 const fetch = require("node-fetch");
@@ -5253,12 +5254,6 @@ function deletePendingDeposit(uniqueCode) {
   });
 }
 
-
-const {
-  buildPayload,
-  headers,
-  API_URL
-} = require('./api-cekpayment-orkut');
 
 async function checkQRISStatus() {
   try {
