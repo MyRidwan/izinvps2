@@ -4,8 +4,7 @@ const express = require('express');
 const { Telegraf, session } = require('telegraf');
 const app = express();
 const axios = require('axios');
-const { buildPayload, headers, API_URL } = require('./api-cekpayment-orkut');
-const { QRISGenerator } = require('autoft-qris');
+const AutoftQRIS = require('autoft-qris');
 const winston = require('winston');
 const fetch = require("node-fetch");
 const FormData = require("form-data");
@@ -5058,7 +5057,7 @@ db.all('SELECT * FROM pending_deposits WHERE status = "pending"', [], (err, rows
   logger.info('Pending deposit loaded:', Object.keys(global.pendingDeposits).length);
 });
 
-const config = {
+const config = new AutoftQRIS{
     storeName: NAMA_STORE,
     auth_username: MERCHANT_ID,
     auth_token: API_KEY,
@@ -5258,26 +5257,24 @@ function deletePendingDeposit(uniqueCode) {
 async function checkQRISStatus() {
   try {
     const pendingDeposits = Object.entries(global.pendingDeposits);
-
+    
     for (const [uniqueCode, deposit] of pendingDeposits) {
       if (deposit.status !== 'pending') continue;
-
+      
       const depositAge = Date.now() - deposit.timestamp;
       if (depositAge > 5 * 60 * 1000) {
         try {
           if (deposit.qrMessageId) {
             await bot.telegram.deleteMessage(deposit.userId, deposit.qrMessageId);
           }
-          await bot.telegram.sendMessage(
-            deposit.userId,
+          await bot.telegram.sendMessage(deposit.userId, 
             '❌ *Pembayaran Expired*\n\n' +
-              'Waktu pembayaran telah habis. Silakan klik Top Up lagi untuk mendapatkan QR baru.',
+            'Waktu pembayaran telah habis. Silakan klik Top Up lagi untuk mendapatkan QR baru.',
             { parse_mode: 'Markdown' }
           );
-        } catch (error) {
+    } catch (error) {
           logger.error('Error deleting expired payment messages:', error);
         }
-
         delete global.pendingDeposits[uniqueCode];
         db.run('DELETE FROM pending_deposits WHERE unique_code = ?', [uniqueCode], (err) => {
           if (err) logger.error('Gagal hapus pending_deposits (expired):', err.message);
@@ -5286,57 +5283,42 @@ async function checkQRISStatus() {
       }
 
       try {
-        const data = buildPayload(); // payload selalu fresh
-        const resultcek = await axios.post(
-        , data, { headers, timeout: 5000 });
+        const result = await qris.checkPayment(uniqueCode, deposit.amount);
+        
+        if (result.success && result.data.status === 'PAID') {
+          const transactionKey = `${result.data.reference}_${result.data.amount}`;
+          if (global.processedTransactions.has(transactionKey)) {
+            logger.info(`Transaction ${transactionKey} already processed, skipping...`);
+        continue;
+      }
 
-        // API balik teks (bukan JSON)
-        const responseText = resultcek.data;
-        //console.log('📦 Raw response from API:\n', responseText);
-
-        // Parse teks jadi array transaksi
-        const transaksiList = [];
-        const blocks = responseText.split('------------------------').filter(Boolean);
-
-        for (const block of blocks) {
-          const kreditMatch = block.match(/Kredit\s*:\s*([\d.]+)/);
-          const tanggalMatch = block.match(/Tanggal\s*:\s*(.+)/);
-          const brandMatch = block.match(/Brand\s*:\s*(.+)/);
-          if (kreditMatch) {
-            transaksiList.push({
-              tanggal: tanggalMatch ? tanggalMatch[1].trim() : '-',
-              kredit: Number(kreditMatch[1].replace(/\./g, '')),
-              brand: brandMatch ? brandMatch[1].trim() : '-'
-            });
+          if (parseInt(result.data.amount) !== deposit.amount) {
+            logger.info(`Amount mismatch for ${uniqueCode}: expected ${deposit.amount}, got ${result.data.amount}`);
+            continue;
           }
-        }
 
-        // Debug hasil parsing
-        console.log('✅ Parsed transaksi:', transaksiList);
+          // Handle receipt if available
+          if (result.receipt && result.receipt.filePath) {
+            logger.info(`Receipt generated: ${result.receipt.filePath}`);
+          }
 
-        // Cocokkan nominal
-        const expectedAmount = deposit.amount;
-        const matched = transaksiList.find(t => t.kredit === expectedAmount);
-
-        if (matched) {
-          const success = await processMatchingPayment(deposit, matched, uniqueCode);
+          const success = await processMatchingPayment(deposit, result.data, uniqueCode);
           if (success) {
             logger.info(`Payment processed successfully for ${uniqueCode}`);
-            delete global.pendingDeposits[uniqueCode];
+  delete global.pendingDeposits[uniqueCode];
             db.run('DELETE FROM pending_deposits WHERE unique_code = ?', [uniqueCode], (err) => {
               if (err) logger.error('Gagal hapus pending_deposits (success):', err.message);
             });
           }
         }
       } catch (error) {
-        logger.error(`Error checking payment status for ${uniqueCode}:`, error);
+        logger.error(`Error checking payment status for ${uniqueCode}:`, error.message);
       }
     }
   } catch (error) {
     logger.error('Error in checkQRISStatus:', error);
   }
 }
-
 
 function keyboard_abc() {
   const alphabet = 'abcdefghijklmnopqrstuvwxyz';
