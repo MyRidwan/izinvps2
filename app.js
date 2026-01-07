@@ -5260,61 +5260,85 @@ const {
   API_URL
 } = require('./api-cekpayment-orkut');
 
-async function checkQRISStatus(userId) {
+async function checkQRISStatus() {
   try {
-    const payload = buildPayload();
+    const pendingDeposits = Object.entries(global.pendingDeposits);
 
-    const response = await axios.post(API_URL, payload, {
-      headers,
-      timeout: 15000
-    });
+    for (const [uniqueCode, deposit] of pendingDeposits) {
+      if (deposit.status !== 'pending') continue;
 
-    const data = response.data;
+      const depositAge = Date.now() - deposit.timestamp;
+      if (depositAge > 5 * 60 * 1000) {
+        try {
+          if (deposit.qrMessageId) {
+            await bot.telegram.deleteMessage(deposit.userId, deposit.qrMessageId);
+          }
+          await bot.telegram.sendMessage(
+            deposit.userId,
+            '❌ *Pembayaran Expired*\n\n' +
+              'Waktu pembayaran telah habis. Silakan klik Top Up lagi untuk mendapatkan QR baru.',
+            { parse_mode: 'Markdown' }
+          );
+        } catch (error) {
+          logger.error('Error deleting expired payment messages:', error);
+        }
 
-    // DEBUG (boleh dihapus nanti)
-    console.log("QRIS HISTORY RESPONSE:", data);
+        delete global.pendingDeposits[uniqueCode];
+        db.run('DELETE FROM pending_deposits WHERE unique_code = ?', [uniqueCode], (err) => {
+          if (err) logger.error('Gagal hapus pending_deposits (expired):', err.message);
+        });
+        continue;
+      }
 
-    /**
-     * Contoh response biasanya:
-     * {
-     *   status: true,
-     *   data: [
-     *     { nominal: "10000", keterangan: "QRIS", waktu: "..." }
-     *   ]
-     * }
-     */
+      try {
+        const data = buildPayload(); // payload selalu fresh
+        const resultcek = await axios.post(
+        , data, { headers, timeout: 5000 });
 
-    if (!data || !data.data || !Array.isArray(data.data)) {
-      return { paid: false };
+        // API balik teks (bukan JSON)
+        const responseText = resultcek.data;
+        //console.log('📦 Raw response from API:\n', responseText);
+
+        // Parse teks jadi array transaksi
+        const transaksiList = [];
+        const blocks = responseText.split('------------------------').filter(Boolean);
+
+        for (const block of blocks) {
+          const kreditMatch = block.match(/Kredit\s*:\s*([\d.]+)/);
+          const tanggalMatch = block.match(/Tanggal\s*:\s*(.+)/);
+          const brandMatch = block.match(/Brand\s*:\s*(.+)/);
+          if (kreditMatch) {
+            transaksiList.push({
+              tanggal: tanggalMatch ? tanggalMatch[1].trim() : '-',
+              kredit: Number(kreditMatch[1].replace(/\./g, '')),
+              brand: brandMatch ? brandMatch[1].trim() : '-'
+            });
+          }
+        }
+
+        // Debug hasil parsing
+        console.log('✅ Parsed transaksi:', transaksiList);
+
+        // Cocokkan nominal
+        const expectedAmount = deposit.amount;
+        const matched = transaksiList.find(t => t.kredit === expectedAmount);
+
+        if (matched) {
+          const success = await processMatchingPayment(deposit, matched, uniqueCode);
+          if (success) {
+            logger.info(`Payment processed successfully for ${uniqueCode}`);
+            delete global.pendingDeposits[uniqueCode];
+            db.run('DELETE FROM pending_deposits WHERE unique_code = ?', [uniqueCode], (err) => {
+              if (err) logger.error('Gagal hapus pending_deposits (success):', err.message);
+            });
+          }
+        }
+      } catch (error) {
+        logger.error(`Error checking payment status for ${uniqueCode}:`, error);
+      }
     }
-
-    // LOGIKA CEK PEMBAYARAN
-    const found = data.data.find(item => {
-      return (
-        item.keterangan?.toLowerCase().includes("qris")
-        // bisa tambah filter nominal / waktu di sini
-      );
-    });
-
-    if (found) {
-      return {
-        paid: true,
-        amount: found.nominal,
-        raw: found
-      };
-    }
-
-    return { paid: false };
-
-  } catch (err) {
-    console.error("❌ checkQRISStatus error:", err.message);
-
-    if (err.response) {
-      console.error("STATUS:", err.response.status);
-      console.error("DATA:", err.response.data);
-    }
-
-    return { paid: false, error: true };
+  } catch (error) {
+    logger.error('Error in checkQRISStatus:', error);
   }
 }
 
