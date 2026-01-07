@@ -5253,71 +5253,71 @@ function deletePendingDeposit(uniqueCode) {
   });
 }
 
-async function checkQRISStatus() {
+
+const {
+  buildPayload,
+  headers,
+  API_URL
+} = require('./api-cekpayment-orkut');
+
+async function checkQRISStatus(userId) {
   try {
-    const pendingDeposits = Object.entries(global.pendingDeposits);
-    
-    for (const [uniqueCode, deposit] of pendingDeposits) {
-      if (deposit.status !== 'pending') continue;
-      
-      const depositAge = Date.now() - deposit.timestamp;
-      if (depositAge > 5 * 60 * 1000) {
-        try {
-          if (deposit.qrMessageId) {
-            await bot.telegram.deleteMessage(deposit.userId, deposit.qrMessageId);
-          }
-          await bot.telegram.sendMessage(deposit.userId, 
-            '❌ *Pembayaran Expired*\n\n' +
-            'Waktu pembayaran telah habis. Silakan klik Top Up lagi untuk mendapatkan QR baru.',
-            { parse_mode: 'Markdown' }
-          );
-    } catch (error) {
-          logger.error('Error deleting expired payment messages:', error);
-        }
-        delete global.pendingDeposits[uniqueCode];
-        db.run('DELETE FROM pending_deposits WHERE unique_code = ?', [uniqueCode], (err) => {
-          if (err) logger.error('Gagal hapus pending_deposits (expired):', err.message);
-        });
-        continue;
-      }
+    const payload = buildPayload();
 
-      try {
-        const result = await qris.checkPayment(uniqueCode, deposit.amount);
-        
-        if (result.success && result.data.status === 'PAID') {
-          const transactionKey = `${result.data.reference}_${result.data.amount}`;
-          if (global.processedTransactions.has(transactionKey)) {
-            logger.info(`Transaction ${transactionKey} already processed, skipping...`);
-        continue;
-      }
+    const response = await axios.post(API_URL, payload, {
+      headers,
+      timeout: 15000
+    });
 
-          if (parseInt(result.data.amount) !== deposit.amount) {
-            logger.info(`Amount mismatch for ${uniqueCode}: expected ${deposit.amount}, got ${result.data.amount}`);
-            continue;
-          }
+    const data = response.data;
 
-          // Handle receipt if available
-          if (result.receipt && result.receipt.filePath) {
-            logger.info(`Receipt generated: ${result.receipt.filePath}`);
-          }
+    // DEBUG (boleh dihapus nanti)
+    console.log("QRIS HISTORY RESPONSE:", data);
 
-          const success = await processMatchingPayment(deposit, result.data, uniqueCode);
-          if (success) {
-            logger.info(`Payment processed successfully for ${uniqueCode}`);
-  delete global.pendingDeposits[uniqueCode];
-            db.run('DELETE FROM pending_deposits WHERE unique_code = ?', [uniqueCode], (err) => {
-              if (err) logger.error('Gagal hapus pending_deposits (success):', err.message);
-            });
-          }
-        }
-      } catch (error) {
-        logger.error(`Error checking payment status for ${uniqueCode}:`, error.message);
-      }
+    /**
+     * Contoh response biasanya:
+     * {
+     *   status: true,
+     *   data: [
+     *     { nominal: "10000", keterangan: "QRIS", waktu: "..." }
+     *   ]
+     * }
+     */
+
+    if (!data || !data.data || !Array.isArray(data.data)) {
+      return { paid: false };
     }
-  } catch (error) {
-    logger.error('Error in checkQRISStatus:', error);
+
+    // LOGIKA CEK PEMBAYARAN
+    const found = data.data.find(item => {
+      return (
+        item.keterangan?.toLowerCase().includes("qris")
+        // bisa tambah filter nominal / waktu di sini
+      );
+    });
+
+    if (found) {
+      return {
+        paid: true,
+        amount: found.nominal,
+        raw: found
+      };
+    }
+
+    return { paid: false };
+
+  } catch (err) {
+    console.error("❌ checkQRISStatus error:", err.message);
+
+    if (err.response) {
+      console.error("STATUS:", err.response.status);
+      console.error("DATA:", err.response.data);
+    }
+
+    return { paid: false, error: true };
   }
 }
+
 
 function keyboard_abc() {
   const alphabet = 'abcdefghijklmnopqrstuvwxyz';
